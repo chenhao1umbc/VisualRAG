@@ -90,8 +90,8 @@ def main():
     )
     
     # Define input/output paths
-    input_path = 'ominidoc_bench.jsonl'
-    output_path = "infer_result_ominidoc_bench.jsonl"
+    input_path = 'test_input.jsonl'
+    output_path = "infer_result_test.jsonl"
     
     # Process data
     with open(input_path, "r", encoding="utf-8") as fin, \
