@@ -5,13 +5,21 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "accelerate>=1.12.0",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.8",
     "pandas>=2.3.3",
+    "peft>=0.18.1",
+    "pillow>=12.1.0",
     "pip>=25.3",
     "polars>=1.37.1",
     "scikit-learn>=1.8.0",
     "scipy>=1.16.3",
     "seaborn>=0.13.2",
-    "transformers>=4.57.3",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "transformers",
 ]
+
+[tool.uv.sources]
+transformers = { git = "https://github.com/huggingface/transformers", rev = "82a06db03535c49aa987719ed0746a76093b1ec4" }
