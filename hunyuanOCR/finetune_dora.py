@@ -1,69 +1,23 @@
 """
-LoRA fine-tuning script for HunyuanOCR.
+DoRA fine-tuning script for HunyuanOCR.
 
-Requirements (install on your remote GPU server):
-    pip install git+https://github.com/huggingface/transformers@82a06db03535c49aa987719ed0746a76093b1ec4
-    pip install peft accelerate bitsandbytes pillow torch
+Identical to finetune_lora.py but uses PEFT DoraConfig instead of LoraConfig.
+DoRA (Weight-Decomposed Low-Rank Adaptation, Liu et al. 2024) decomposes the
+pretrained weight into magnitude and direction components, applying LoRA only
+to the direction, which empirically outperforms standard LoRA on NLP and VLM tasks.
 
 Usage:
-    python finetune_lora.py --data_dir ./sample_data
+    python hunyuanOCR/finetune_dora.py \\
+        --data_dir dataset/train_medium \\
+        --output_dir dora-output \\
+        --epochs 3 \\
+        --gradient_checkpointing \\
+        --max_length 2048 \\
+        --max_pixels 1048576
 
-Dataset structure:
+Dataset structure (same as finetune_lora.py):
     data_dir/
-        train.jsonl
-        images/
-            receipt_001.jpg
-            document_001.jpg
-            ...
-
-Each line in train.jsonl has 3 fields:
-    {
-        "image": "images/receipt_001.jpg",   <- relative path to image
-        "prompt": "...",                      <- the task instruction (see PROMPT GUIDE below)
-        "response": "..."                    <- the expected model output
-    }
-
-=== PROMPT GUIDE (from HunyuanOCR official instructions) ===
-
-Task 1: Text Spotting (detect + recognize text with bounding boxes)
-    Prompt:   "Detect and recognize text in the image, and output the text coordinates
-               in a formatted manner."
-    Response: "<ref>COFFEE SHOP</ref><quad>(120,50),(480,120)</quad>\n
-               <ref>OPEN 7AM-9PM</ref><quad>(150,140),(430,200)</quad>"
-    Note:     Coordinates are normalized to [0, 1000] range.
-
-Task 2: Document Parsing (full page -> markdown)
-    Prompt:   "Extract all information from the main body of the document image and
-               represent it in markdown format, ignoring headers and footers. Tables
-               should be expressed in HTML format, formulas in the document should be
-               represented using LaTeX format, and the parsing should be organized
-               according to the reading order."
-    Response: "## Title\n\nParagraph text...\n\n<table>...</table>\n\n$$formula$$"
-
-Task 3: General Text Extraction
-    Prompt:   "Extract the text in the image."
-    Response: "All visible text content in reading order..."
-
-Task 4: Formula Recognition
-    Prompt:   "Identify the formula in the image and represent it using LaTeX format."
-    Response: "$$E = mc^2$$"
-
-Task 5: Table Parsing
-    Prompt:   "Parse the table in the image into HTML."
-    Response: "<table><tr><th>Name</th><th>Age</th></tr>...</table>"
-
-Task 6: Information Extraction (structured fields -> JSON)
-    Prompt:   "Extract the content of the fields: ['name','company','phone','email']
-               from the image and return it in JSON format."
-    Response: '{"name": "John", "company": "Acme", "phone": "555-0123", "email": "j@a.com"}'
-
-Task 7: Video Subtitle Extraction
-    Prompt:   "Extract the subtitles from the image."
-    Response: "First line of subtitle\nSecond line of subtitle"
-
-Task 8: Translation
-    Prompt:   "First extract the text, then translate the text content into English."
-    Response: "[parsing]\nOriginal text...\n\n[translation]\nTranslated text..."
+        train.jsonl   <- {"image": "...", "prompt": "...", "response": "..."}
 """
 
 import argparse
@@ -71,9 +25,9 @@ import itertools
 import os
 
 import torch
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from torch.utils.data import DataLoader, Subset
 from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
-from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 
 from hunyuanOCR.dataset import OCRDataset, collate_fn
 
@@ -87,55 +41,44 @@ def _get_device() -> torch.device:
 
 
 def _make_epoch_indices(dataset_size: int, epoch: int, skip: int = 0, seed: int = 42) -> list[int]:
-    """Return shuffled dataset indices for one epoch, skipping the first `skip` items.
-
-    Uses a fixed seed per epoch so the shuffle is reproducible across restarts.
-    """
+    """Return shuffled dataset indices for one epoch, skipping the first `skip` items."""
     g = torch.Generator()
     g.manual_seed(seed + epoch)
     return torch.randperm(dataset_size, generator=g).tolist()[skip:]
 
 
 def find_target_modules(model: torch.nn.Module) -> list[str]:
-    """Find all linear layer names in the LLM (model.layers.*) for LoRA.
-
-    HunyuanOCR structure:
-        model.layers.*  -> LLM (Hunyuan-0.5B) — LoRA targets here
-        vit.*           -> Vision Transformer — frozen, skip
-        lm_head         -> output head — skip
-    """
-    target_modules = set()
+    """Find all linear layer names in the LLM (model.layers.*) for DoRA."""
+    target_modules: set[str] = set()
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear) and name.startswith("model.layers."):
-            short_name = name.split(".")[-1]
-            target_modules.add(short_name)
-    print(f"Found LoRA target modules: {target_modules}")
+            target_modules.add(name.split(".")[-1])
+    print(f"Found DoRA target modules: {target_modules}")
     return list(target_modules)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="LoRA fine-tune HunyuanOCR")
+    parser = argparse.ArgumentParser(description="DoRA fine-tune HunyuanOCR")
     parser.add_argument("--model_path", type=str, default="tencent/HunyuanOCR")
     parser.add_argument("--data_dir", type=str, required=True,
-                        help="Path to dataset dir containing train.jsonl and images/")
-    parser.add_argument("--output_dir", type=str, default="./hunyuanocr-lora-output")
+                        help="Path to dataset dir containing train.jsonl")
+    parser.add_argument("--output_dir", type=str, default="./dora-output")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--max_length", type=int, default=2048)
-    parser.add_argument("--lora_rank", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=int, default=32)
-    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--dora_rank", type=int, default=16)
+    parser.add_argument("--dora_alpha", type=int, default=32)
+    parser.add_argument("--dora_dropout", type=float, default=0.05)
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--gradient_checkpointing", action="store_true",
                         help="Enable gradient checkpointing to reduce activation memory")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,
-                        help="Path to checkpoint dir to resume from (e.g. lora-output-v2/checkpoint-600)")
+                        help="Path to checkpoint dir to resume from (e.g. dora-output/checkpoint-600)")
     parser.add_argument("--max_pixels", type=int, default=1048576,
-                        help="Max image pixels fed to the vision encoder (default 1M = 1024 image tokens). "
-                             "Reduce to prevent sequence-length OOM on MPS.")
+                        help="Max image pixels for the vision encoder (default 1M = 1024 tokens)")
     parser.add_argument("--replay_data_dir", type=str, default=None,
                         help="Path to replay dataset dir (train.jsonl + images/). "
                              "Every --replay_every optimizer steps, one batch is substituted from this set.")
@@ -158,12 +101,10 @@ def main() -> None:
         dtype=torch.bfloat16,
     ).to(device)
 
-    # Freeze the vision encoder (vit.*) — only fine-tune the LLM via LoRA
     for name, param in model.named_parameters():
         if name.startswith("vit."):
             param.requires_grad = False
 
-    # Configure LoRA — either resume from checkpoint or create fresh adapters
     resume_step = 0
     if args.resume_from_checkpoint:
         model = PeftModel.from_pretrained(model, args.resume_from_checkpoint, is_trainable=True)
@@ -172,14 +113,15 @@ def main() -> None:
         print(f"Resuming from checkpoint: {args.resume_from_checkpoint} (step {resume_step})")
     else:
         target_modules = find_target_modules(model)
-        lora_config = LoraConfig(
+        dora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
+            r=args.dora_rank,
+            lora_alpha=args.dora_alpha,
+            lora_dropout=args.dora_dropout,
             target_modules=target_modules,
+            use_dora=True,
         )
-        model = get_peft_model(model, lora_config)
+        model = get_peft_model(model, dora_config)
     model.print_trainable_parameters()
 
     if args.gradient_checkpointing:
@@ -218,7 +160,6 @@ def main() -> None:
         optimizer, T_max=max(total_steps, 1)
     )
 
-    # Advance scheduler to match resume point (cheap — no gradients)
     for _ in range(resume_step):
         scheduler.step()
 
@@ -271,9 +212,7 @@ def main() -> None:
                     )
 
                 if global_step % args.save_steps == 0:
-                    save_path = os.path.join(
-                        args.output_dir, f"checkpoint-{global_step}"
-                    )
+                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                     model.save_pretrained(save_path)
                     print(f"Saved checkpoint to {save_path}")
 
