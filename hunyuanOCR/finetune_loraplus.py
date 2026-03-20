@@ -1,19 +1,21 @@
 """
-DoRA fine-tuning script for HunyuanOCR.
+LoRA+ fine-tuning script for HunyuanOCR.
 
-Identical to finetune_lora.py but uses PEFT DoraConfig instead of LoraConfig.
-DoRA (Weight-Decomposed Low-Rank Adaptation, Liu et al. 2024) decomposes the
-pretrained weight into magnitude and direction components, applying LoRA only
-to the direction, which empirically outperforms standard LoRA on NLP and VLM tasks.
+LoRA+ (Hayou et al., 2024) improves on standard LoRA by using separate learning
+rates for the A and B adapter matrices. A matrices are initialized from a Gaussian
+and updated at the base learning rate; B matrices are initialized to zero and
+updated at a higher rate (lr * loraplus_lr_ratio, default 16×). This asymmetry
+better matches the effective gradient magnitudes and improves convergence.
 
 Usage:
-    python hunyuanOCR/finetune_dora.py \\
+    python hunyuanOCR/finetune_loraplus.py \\
         --data_dir dataset/train_medium \\
-        --output_dir dora-output \\
+        --output_dir loraplus-output \\
         --epochs 3 \\
         --gradient_checkpointing \\
         --max_length 2048 \\
-        --max_pixels 1048576
+        --max_pixels 1048576 \\
+        --loraplus_lr_ratio 16.0
 
 Dataset structure (same as finetune_lora.py):
     data_dir/
@@ -26,9 +28,9 @@ import itertools
 import os
 
 import torch
-from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from torch.utils.data import DataLoader, Subset
 from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
+from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 
 from hunyuanOCR.dataset import OCRDataset, collate_fn
 
@@ -58,37 +60,67 @@ def _make_epoch_indices(dataset_size: int, epoch: int, skip: int = 0, seed: int 
 
 
 def find_target_modules(model: torch.nn.Module) -> list[str]:
-    """Find all linear layer names in the LLM (model.layers.*) for DoRA."""
-    target_modules: set[str] = set()
+    """Find all linear layer names in the LLM (model.layers.*) for LoRA+."""
+    target_modules = set()
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear) and name.startswith("model.layers."):
             target_modules.add(name.split(".")[-1])
-    print(f"Found DoRA target modules: {target_modules}")
+    print(f"Found LoRA+ target modules: {target_modules}")
     return list(target_modules)
 
 
+def _build_loraplus_optimizer(
+    model: torch.nn.Module,
+    lr: float,
+    lr_ratio: float,
+    weight_decay: float,
+) -> torch.optim.AdamW:
+    """Build AdamW with LoRA+ param groups: A matrices at lr, B matrices at lr * lr_ratio."""
+    a_params: list[torch.nn.Parameter] = []
+    b_params: list[torch.nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "lora_B" in name:
+            b_params.append(param)
+        else:
+            a_params.append(param)
+    print(f"LoRA+ param groups: {len(a_params)} A-group params (lr={lr:.2e}), "
+          f"{len(b_params)} B-group params (lr={lr * lr_ratio:.2e})")
+    return torch.optim.AdamW(
+        [
+            {"params": a_params, "lr": lr},
+            {"params": b_params, "lr": lr * lr_ratio},
+        ],
+        weight_decay=weight_decay,
+    )
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DoRA fine-tune HunyuanOCR")
+    parser = argparse.ArgumentParser(description="LoRA+ fine-tune HunyuanOCR")
     parser.add_argument("--model_path", type=str, default="tencent/HunyuanOCR")
     parser.add_argument("--data_dir", type=str, required=True,
-                        help="Path to dataset dir containing train.jsonl")
-    parser.add_argument("--output_dir", type=str, default="./dora-output")
+                        help="Path to dataset dir containing train.jsonl and images/")
+    parser.add_argument("--output_dir", type=str, default="./loraplus-output")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--loraplus_lr_ratio", type=float, default=16.0,
+                        help="LR multiplier for LoRA B matrices relative to A matrices (default: 16.0)")
     parser.add_argument("--max_length", type=int, default=2048)
-    parser.add_argument("--dora_rank", type=int, default=16)
-    parser.add_argument("--dora_alpha", type=int, default=32)
-    parser.add_argument("--dora_dropout", type=float, default=0.05)
+    parser.add_argument("--lora_rank", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--gradient_checkpointing", action="store_true",
                         help="Enable gradient checkpointing to reduce activation memory")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,
-                        help="Path to checkpoint dir to resume from (e.g. dora-output/checkpoint-600)")
+                        help="Path to checkpoint dir to resume from (e.g. loraplus-output/checkpoint-600)")
     parser.add_argument("--max_pixels", type=int, default=1048576,
-                        help="Max image pixels for the vision encoder (default 1M = 1024 tokens)")
+                        help="Max image pixels fed to the vision encoder (default 1M = 1024 image tokens). "
+                             "Reduce to prevent sequence-length OOM on MPS.")
     parser.add_argument("--warmup_ratio", type=float, default=0.05,
                         help="Fraction of total steps used for linear LR warmup (default: 0.05)")
     parser.add_argument("--replay_data_dir", type=str, default=None,
@@ -125,15 +157,14 @@ def main() -> None:
         print(f"Resuming from checkpoint: {args.resume_from_checkpoint} (step {resume_step})")
     else:
         target_modules = find_target_modules(model)
-        dora_config = LoraConfig(
+        lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=args.dora_rank,
-            lora_alpha=args.dora_alpha,
-            lora_dropout=args.dora_dropout,
+            r=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
             target_modules=target_modules,
-            use_dora=True,
         )
-        model = get_peft_model(model, dora_config)
+        model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
     if args.gradient_checkpointing:
@@ -163,9 +194,10 @@ def main() -> None:
     start_epoch = resume_step // steps_per_epoch
     skip_in_epoch = resume_step % steps_per_epoch
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
+    optimizer = _build_loraplus_optimizer(
+        model,
         lr=args.lr,
+        lr_ratio=args.loraplus_lr_ratio,
         weight_decay=0.01,
     )
     warmup_steps = int(total_steps * args.warmup_ratio)
@@ -217,11 +249,11 @@ def main() -> None:
 
                 if global_step % args.logging_steps == 0:
                     avg_loss = epoch_loss / (step + 1) * args.gradient_accumulation_steps
-                    lr = scheduler.get_last_lr()[0]
+                    lrs = scheduler.get_last_lr()
                     print(
                         f"Epoch {epoch+1}/{args.epochs} | "
                         f"Step {global_step}/{total_steps} | "
-                        f"Loss: {avg_loss:.4f} | LR: {lr:.2e}"
+                        f"Loss: {avg_loss:.4f} | LR_A: {lrs[0]:.2e} | LR_B: {lrs[1]:.2e}"
                     )
 
                 if global_step % args.save_steps == 0:

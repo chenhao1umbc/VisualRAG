@@ -67,6 +67,7 @@ Task 8: Translation
 """
 
 import argparse
+import functools
 import itertools
 import os
 
@@ -76,6 +77,15 @@ from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 
 from hunyuanOCR.dataset import OCRDataset, collate_fn
+
+
+def _lr_warmup_decay(current_step: int, warmup_steps: int, total_steps: int) -> float:
+    """LambdaLR multiplier: linear warmup then linear decay to 0."""
+    if current_step < warmup_steps:
+        return current_step / max(1, warmup_steps)
+    remaining = total_steps - current_step
+    decay_steps = total_steps - warmup_steps
+    return max(0.0, remaining / max(1, decay_steps))
 
 
 def _get_device() -> torch.device:
@@ -136,6 +146,8 @@ def main() -> None:
     parser.add_argument("--max_pixels", type=int, default=1048576,
                         help="Max image pixels fed to the vision encoder (default 1M = 1024 image tokens). "
                              "Reduce to prevent sequence-length OOM on MPS.")
+    parser.add_argument("--warmup_ratio", type=float, default=0.05,
+                        help="Fraction of total steps used for linear LR warmup (default: 0.05)")
     parser.add_argument("--replay_data_dir", type=str, default=None,
                         help="Path to replay dataset dir (train.jsonl + images/). "
                              "Every --replay_every optimizer steps, one batch is substituted from this set.")
@@ -214,8 +226,9 @@ def main() -> None:
         lr=args.lr,
         weight_decay=0.01,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(total_steps, 1)
+    warmup_steps = int(total_steps * args.warmup_ratio)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, functools.partial(_lr_warmup_decay, warmup_steps=warmup_steps, total_steps=total_steps)
     )
 
     # Advance scheduler to match resume point (cheap — no gradients)
