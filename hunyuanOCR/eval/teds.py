@@ -5,19 +5,7 @@ Used for Phase 1.1 (FinTabNet.c baseline) and Phase 3.1 (full evaluation).
 Reference: Zhong et al., "Image-based table recognition: data, model, and evaluation", ECCV 2020.
 """
 
-import re
-from collections import deque
-
-
-def _tokenize_html(html: str) -> list[str]:
-    """Tokenize HTML into a flat list of tag/text tokens."""
-    tokens = []
-    html = re.sub(r"\s+", " ", html.strip())
-    for part in re.split(r"(<[^>]+>)", html):
-        part = part.strip()
-        if part:
-            tokens.append(part)
-    return tokens
+from bs4 import BeautifulSoup
 
 
 class HTMLTableNode:
@@ -33,39 +21,46 @@ class HTMLTableNode:
         return f"<{self.tag}>{self.text[:20]}"
 
 
+def _build_node(tag) -> "HTMLTableNode | None":
+    """Recursively build an HTMLTableNode from a BeautifulSoup tag."""
+    if isinstance(tag, str):
+        text = tag.strip()
+        return HTMLTableNode("text", text=text) if text else None
+    name = getattr(tag, "name", None)
+    if name is None:
+        return None
+    attrs = {k: " ".join(v) if isinstance(v, list) else str(v) for k, v in tag.attrs.items()}
+    node = HTMLTableNode(name, attrs=attrs)
+    for child in tag.children:
+        child_node = _build_node(child)
+        if child_node is not None:
+            node.children.append(child_node)
+    # Collapse direct text children into node.text
+    text_parts = [c.text for c in node.children if c.tag == "text"]
+    node.children = [c for c in node.children if c.tag != "text"]
+    node.text = " ".join(text_parts).strip()
+    return node
+
+
+def _strip_cell_text(html: str) -> str:
+    """Strip text content from all td/th cells (for structure-only TEDS)."""
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup.find_all(["td", "th"]):
+        tag.string = ""
+    return str(soup)
+
+
 def _parse_table_tree(html: str) -> HTMLTableNode:
     """
     Parse an HTML table string into a tree structure.
     Handles colspan/rowspan and nested tags.
     """
-    from bs4 import BeautifulSoup
-
     soup = BeautifulSoup(html, "lxml")
     table = soup.find("table") or soup
-
-    def _build_node(tag) -> HTMLTableNode:
-        if isinstance(tag, str):
-            text = tag.strip()
-            return HTMLTableNode("text", text=text) if text else None
-        name = getattr(tag, "name", None)
-        if name is None:
-            return None
-        attrs = {k: " ".join(v) if isinstance(v, list) else str(v) for k, v in tag.attrs.items()}
-        node = HTMLTableNode(name, attrs=attrs)
-        for child in tag.children:
-            child_node = _build_node(child)
-            if child_node is not None:
-                node.children.append(child_node)
-        # Collapse direct text children into node.text
-        text_parts = [c.text for c in node.children if c.tag == "text"]
-        node.children = [c for c in node.children if c.tag != "text"]
-        node.text = " ".join(text_parts).strip()
-        return node
-
     return _build_node(table)
 
 
-def _tree_edit_distance(tree1: HTMLTableNode | None, tree2: HTMLTableNode | None) -> int:
+def _tree_edit_distance(tree1: HTMLTableNode | None, tree2: HTMLTableNode | None) -> float:
     """
     Compute tree edit distance between two HTML table trees.
     Uses a simplified Zhang-Shasha algorithm (node insertion/deletion/substitution).
@@ -91,15 +86,11 @@ def _tree_edit_distance(tree1: HTMLTableNode | None, tree2: HTMLTableNode | None
 
     # Align children greedily (simplified — full DP for sequence alignment)
     n1, n2 = len(tree1.children), len(tree2.children)
-    # DP alignment of children sequences
     dp = [[0] * (n2 + 1) for _ in range(n1 + 1)]
     for i in range(n1 + 1):
-        dp[i][0] = sum(
-            1 + sum(_tree_size(tree1.children[k]) for k in range(i)) - i
-            for _ in range(1)
-        ) if i > 0 else 0
-    for j in range(n2 + 1):
-        dp[0][j] = 0  # skip initialization for brevity
+        dp[i][0] = sum(_tree_size(tree1.children[k]) for k in range(i))
+    for j in range(1, n2 + 1):
+        dp[0][j] = sum(_tree_size(tree2.children[k]) for k in range(j))
 
     for i in range(1, n1 + 1):
         for j in range(1, n2 + 1):
@@ -136,15 +127,8 @@ def teds(pred_html: str, gold_html: str, structure_only: bool = False) -> float:
         return 0.0
 
     if structure_only:
-        # Strip cell text for structure-only evaluation
-        from bs4 import BeautifulSoup
-        def strip_text(html):
-            soup = BeautifulSoup(html, "lxml")
-            for tag in soup.find_all(["td", "th"]):
-                tag.string = ""
-            return str(soup)
-        pred_html = strip_text(pred_html)
-        gold_html = strip_text(gold_html)
+        pred_html = _strip_cell_text(pred_html)
+        gold_html = _strip_cell_text(gold_html)
 
     tree_pred = _parse_table_tree(pred_html)
     tree_gold = _parse_table_tree(gold_html)
@@ -153,7 +137,7 @@ def teds(pred_html: str, gold_html: str, structure_only: bool = False) -> float:
     size = _tree_size(tree_pred) + _tree_size(tree_gold)
     if size == 0:
         return 1.0
-    return 1.0 - (2.0 * dist / size)
+    return max(0.0, 1.0 - (2.0 * dist / size))
 
 
 def compute_teds_batch(predictions: list[dict], structure_only: bool = False) -> dict:

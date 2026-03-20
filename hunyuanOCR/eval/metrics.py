@@ -85,9 +85,6 @@ def span_f1_underline(pred: str, gold: str) -> float:
     return token_set_f1(extract_html_spans(pred, "u"), extract_html_spans(gold, "u"))
 
 
-def exact_match_rate(preds: list[str], golds: list[str]) -> float:
-    return sum(p.strip() == g.strip() for p, g in zip(preds, golds)) / max(len(golds), 1)
-
 
 # ─── Color accuracy ────────────────────────────────────────────────────────────
 

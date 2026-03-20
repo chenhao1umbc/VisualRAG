@@ -128,6 +128,22 @@ def _save_dual_lora_adapters(model: nn.Module, path: str) -> None:
     print(f"Saved {len(adapters)} Dual LoRA adapters to {path}")
 
 
+def _load_dual_lora_adapters(model: nn.Module, path: str, device: torch.device) -> None:
+    """Load saved Dual LoRA A/B/C/D weights into DualLoraLinear modules after apply_dual_lora."""
+    adapters: dict = torch.load(path, map_location="cpu")
+    named_modules = dict(model.named_modules())
+    loaded = 0
+    for layer_name, weights in adapters.items():
+        mod = named_modules.get(layer_name)
+        if isinstance(mod, DualLoraLinear):
+            mod.A.data.copy_(weights["A"].to(device))
+            mod.B.data.copy_(weights["B"].to(device))
+            mod.C.data.copy_(weights["C"].to(device))
+            mod.D.data.copy_(weights["D"].to(device))
+            loaded += 1
+    print(f"Loaded {loaded}/{len(adapters)} Dual LoRA adapter layers from {path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dual LoRA fine-tune HunyuanOCR")
     # Inherited from finetune_lora.py
@@ -144,6 +160,10 @@ def main() -> None:
                              "Reduce to prevent sequence-length OOM on MPS.")
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument("--gradient_checkpointing", action="store_true",
+                        help="Enable gradient checkpointing to reduce activation memory")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                        help="Path to checkpoint dir to resume from (e.g. duallora-output/checkpoint-600)")
     # Dual LoRA specific
     parser.add_argument("--dual_lora_rank", type=int, default=16,
                         help="Rank r for both magnitude and direction groups (r1=r2=r)")
@@ -162,8 +182,8 @@ def main() -> None:
                         help="Fraction of total steps used for linear LR warmup (default: 0.05)")
     parser.add_argument("--replay_data_dir", type=str, default=None,
                         help="Path to SynFinTabs replay dataset dir (optional)")
-    parser.add_argument("--replay_every", type=int, default=8,
-                        help="Substitute a replay batch every N optimizer steps")
+    parser.add_argument("--replay_every", type=int, default=4,
+                        help="Substitute a replay batch every N optimizer steps (default: 4)")
     args = parser.parse_args()
 
     print("Loading processor...")
@@ -197,6 +217,21 @@ def main() -> None:
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     print(f"Trainable parameters: {trainable:,} / {total:,} ({trainable/total*100:.2f}%)")
+
+    resume_step = 0
+    if args.resume_from_checkpoint:
+        adapters_path = os.path.join(args.resume_from_checkpoint, "dual_lora_adapters_only.pt")
+        if not os.path.exists(adapters_path):
+            raise FileNotFoundError(f"No dual_lora_adapters_only.pt in {args.resume_from_checkpoint}")
+        _load_dual_lora_adapters(model, adapters_path, device)
+        ckpt_name = os.path.basename(args.resume_from_checkpoint.rstrip("/"))
+        resume_step = int(ckpt_name.split("-")[-1])
+        print(f"Resuming from checkpoint: {args.resume_from_checkpoint} (step {resume_step})")
+
+    if args.gradient_checkpointing:
+        model.enable_input_require_grads()
+        model.gradient_checkpointing_enable()
+        print("Gradient checkpointing enabled.")
 
     # Store final scales for warm-up restoration
     dual_modules = _collect_dual_lora_modules(model)
@@ -237,18 +272,24 @@ def main() -> None:
         replay_iter = itertools.cycle(replay_loader)
         print(f"Replay buffer: {len(replay_dataset)} samples, injecting every {args.replay_every} optimizer steps")
 
-    total_steps = len(main_loader) * args.epochs // args.gradient_accumulation_steps
+    steps_per_epoch = len(main_loader) // args.gradient_accumulation_steps
+    total_steps = steps_per_epoch * args.epochs
+    start_epoch = resume_step // max(steps_per_epoch, 1)
     warmup_steps_lr = int(total_steps * args.warmup_ratio)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, functools.partial(_lr_warmup_decay, warmup_steps=warmup_steps_lr, total_steps=total_steps)
     )
 
+    for _ in range(resume_step):
+        scheduler.step()
+
     os.makedirs(args.output_dir, exist_ok=True)
     model.train()
-    global_step = 0
+    global_step = resume_step
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         epoch_loss = 0.0
+        epoch_accum_steps = 0
         for step, batch in enumerate(main_loader):
             # Inject replay batch instead of main batch every replay_every optimizer steps
             if replay_iter is not None and global_step > 0 and global_step % args.replay_every == 0:
@@ -270,6 +311,7 @@ def main() -> None:
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
+                epoch_accum_steps += 1
 
                 # Linear warm-up: scale adapter contribution from 0 → final
                 _set_warmup_scale(model, global_step, args.warmup_steps, final_scales)
@@ -294,7 +336,7 @@ def main() -> None:
                     )
                     print(f"Saved checkpoint to {ckpt_dir}")
 
-        avg = epoch_loss / len(main_loader) * args.gradient_accumulation_steps
+        avg = epoch_loss / max(epoch_accum_steps * args.gradient_accumulation_steps, 1)
         print(f"Epoch {epoch+1} finished. Avg loss: {avg:.4f}")
 
     final_dir = os.path.join(args.output_dir, "final")

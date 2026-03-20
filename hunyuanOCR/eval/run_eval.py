@@ -322,6 +322,9 @@ def main() -> None:
             "feature": feature,
         })
 
+        if (i + 1) % 100 == 0 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         if (i + 1) % 10 == 0 or (i + 1) == len(eval_records):
             counts_str = "  ".join(f"{f}={n}" for f, n in sorted(feature_counts.items()))
             print(f"  [{i+1}/{len(eval_records)}]  {counts_str}")
