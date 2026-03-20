@@ -9,6 +9,15 @@ Metrics:
 """
 
 import re
+from collections import defaultdict
+
+from hunyuanOCR.eval.teds import teds
+
+
+# ─── Shared helper ────────────────────────────────────────────────────────────
+
+def _token_set(s: str) -> set[str]:
+    return set(s.lower().split())
 
 
 # ─── Span-level F1 (strikethrough / underline) ────────────────────────────────
@@ -26,34 +35,31 @@ def extract_html_spans(text: str, tag: str) -> list[str]:
 
 
 def extract_color_spans(text: str) -> list[tuple[str, str]]:
-    """Extract (color_name, text) tuples from <span style='color:NAME;'>text</span>."""
-    pattern = r'<span[^>]+color\s*:\s*([a-zA-Z]+)[^>]*>(.*?)</span>'
+    """Extract (color_name, text) tuples from <span style='background-color:NAME;'>text</span>."""
+    pattern = r'<span[^>]+background-color\s*:\s*([a-zA-Z]+)[^>]*>(.*?)</span>'
     return [(m[0].lower(), m[1]) for m in re.findall(pattern, text, re.DOTALL | re.IGNORECASE)]
 
 
 def token_set_f1(pred_spans: list[str], gold_spans: list[str]) -> float:
     """
     Compute span-level F1 using token sets.
-    A predicted span matches if its token set overlaps ≥ 50% with any gold span.
+    A predicted span matches if its token set overlaps >= 50% with any gold span.
     """
     if not gold_spans:
         return 1.0 if not pred_spans else 0.0
     if not pred_spans:
         return 0.0
 
-    def tokens(s: str) -> set[str]:
-        return set(s.lower().split())
-
     tp = 0
     matched_gold = set()
     for pred in pred_spans:
-        pred_toks = tokens(pred)
+        pred_toks = _token_set(pred)
         best_overlap = 0.0
         best_j = -1
         for j, gold in enumerate(gold_spans):
             if j in matched_gold:
                 continue
-            gold_toks = tokens(gold)
+            gold_toks = _token_set(gold)
             if not gold_toks:
                 continue
             overlap = len(pred_toks & gold_toks) / len(pred_toks | gold_toks)
@@ -97,14 +103,11 @@ def color_classification_accuracy(pred: str, gold: str) -> float:
     if not pred_spans:
         return 0.0
 
-    def tokens(s: str) -> set[str]:
-        return set(s.lower().split())
-
     correct = 0
     for gold_color, gold_text in gold_spans:
-        gold_toks = tokens(gold_text)
+        gold_toks = _token_set(gold_text)
         for pred_color, pred_text in pred_spans:
-            overlap = len(tokens(pred_text) & gold_toks) / max(len(tokens(pred_text) | gold_toks), 1)
+            overlap = len(_token_set(pred_text) & gold_toks) / max(len(_token_set(pred_text) | gold_toks), 1)
             if overlap >= 0.5 and pred_color == gold_color:
                 correct += 1
                 break
@@ -155,7 +158,6 @@ def evaluate_batch(records: list[dict]) -> dict:
 
     Returns dict with per-feature and overall metrics.
     """
-    from collections import defaultdict
     results: dict[str, list] = defaultdict(list)
 
     for rec in records:
@@ -164,7 +166,6 @@ def evaluate_batch(records: list[dict]) -> dict:
         feature = rec.get("feature", "general")
 
         if feature == "tables":
-            from hunyuanOCR.eval.teds import teds
             results["teds"].append(teds(pred, gold))
         elif feature == "strikethrough":
             results["strike_f1"].append(span_f1_strikethrough(pred, gold))
