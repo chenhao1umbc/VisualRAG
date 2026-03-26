@@ -2,7 +2,7 @@
 
 ## 3.1 Overview and Design Principles
 
-We construct **FinDocOCR**, a multi-feature dataset for format-aware financial document OCR. The dataset is designed around four formatting features that carry semantic meaning in financial documents but are discarded by all existing OCR systems: **strikethrough text** (indicating deleted or amended values), **underlined text** (indicating emphasis or running totals), **colored text** (encoding semantic categories such as warnings, hyperlinks, or key figures), and **complex financial tables** with merged cells and multi-level headers.
+We construct **FinDocOCR**, a multi-feature dataset for format-aware financial document OCR. The dataset is designed around four formatting features that carry semantic meaning in financial documents but are discarded by all existing OCR systems: **strikethrough text** (indicating deleted or amended values), **underlined text** (indicating emphasis or running totals), **highlighted text** (encoding semantic categories such as warnings, hyperlinks, or key figures), and **complex financial tables** with merged cells and multi-level headers.
 
 The design is motivated by two observations from the related work survey. First, no existing benchmark—including OmniDocBench (Ouyang et al., CVPR 2025), the most comprehensive open benchmark for document parsing—provides annotation types for strikethrough, underline, or text color (§2.2). Second, financial document AI research has established that structural and semantic richness in financial filings creates distinct OCR challenges that general-purpose datasets do not address (Chen et al., EMNLP 2021; Zhu et al., ACL 2021). FinDocOCR is the first dataset to combine all four target features in a unified training and evaluation framework.
 
@@ -33,7 +33,7 @@ All ground truth in FinDocOCR follows a unified output format designed to be par
 |---|---|---|
 | Strikethrough | `~~text~~` (Markdown) | `~~Net income: $4.2M~~` |
 | Underline | `<u>text</u>` (HTML inline) | `<u>Total assets</u>` |
-| Colored text | `<span style="color:NAME;">text</span>` | `<span style="color:red;">Loss from operations</span>` |
+| Highlighted text | `<span style="background-color:NAME;">text</span>` | `<span style="background-color:red;">Loss from operations</span>` |
 | Complex tables | `<table>` with `colspan`/`rowspan` | Full structural HTML |
 | Plain text / formulas | Markdown / `$$...$$` LaTeX | Standard OCR output |
 
@@ -58,7 +58,7 @@ The complete FinDocOCR training set is summarized below.
 | Complex tables | FinTabNet.c (2,064) + SynFinTabs test (200) + EDGAR (1,301) | 3,565 | ~4K (current) | Complete; EDGAR pipeline ready to scale |
 | Strikethrough | EDGAR amendments (446) + synthetic (5,000) | 5,446 | ~5K | Complete |
 | Underline | Synthetic generator | 5,000 | ~5K | Complete |
-| Colored text | Synthetic color (5,000) + mixed-feature (5,000) | 10,000 | ~10K | Complete |
+| Highlighted text | Synthetic color (5,000) + mixed-feature (5,000) | 10,000 | ~10K | Complete |
 | General replay (SynFinTabs) | SynFinTabs train split | 5,000 | ~5K | Complete |
 | **Total (excl. replay)** | | **23,011** | **~24K** | |
 | **Total (incl. replay)** | | **28,011** | **~29K** | |

@@ -5,6 +5,17 @@
 dataset/
 *.png
 
+# Training output directories and results (data — not tracked)
+*-output*/
+results/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+paper/*.out
+paper/main.pdf
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

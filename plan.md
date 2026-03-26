@@ -3,6 +3,35 @@
 
 ---
 
+## Standing Policies
+
+- **Package manager**: always `uv` (`uv pip install`, `uv run`, `uv sync`). Never bare `pip`.
+- **Git commits**: targeted `git add <specific files>` only. Never `git add .` or `git add -A`. Exclude: `lora-output*/`, `dora-output*/`, `duallora-output*/`, `results/`, `dataset/train*/`, `dataset/eval/`, `dataset/replay_proper/`, `notes/`, `*.log`.
+
+---
+
+# Code Review Plan — FinDocOCR Implementation
+
+## Bug Fixes (existing code — must fix before Phase 2)
+
+- [x] **CR-1** `hunyuanOCR/eval/teds.py` — DP child-alignment initialization corrected *(approved 2026-03-14)*
+- [x] **CR-2** `hunyuanOCR/eval/teds.py` — `_build_node` and `_strip_cell_text` extracted to module level *(approved 2026-03-14)*
+- [x] **CR-3** `hunyuanOCR/eval/teds.py` — `BeautifulSoup` at top; `deque` and `_tokenize_html` dead code removed *(approved 2026-03-14)*
+- [x] **CR-4** `dataset/compute_kappa.py` — Kappa degeneracy documented; F1 >= 0.85 as primary metric *(approved 2026-03-14)*
+- [x] **CR-5** `dataset/compute_kappa.py` — Context manager; `defaultdict` at top *(approved 2026-03-14)*
+- [x] **CR-6** `hunyuanOCR/eval/metrics.py` — `_token_set` module-level; all imports at top *(approved 2026-03-14)*
+- [x] **CR-7** `dataset/edgar_pipeline.py` — `import copy` at top *(approved 2026-03-14)*
+- [x] **CR-8** `dataset/synthetic_generator.py` — `argparse`/`tqdm` at top *(approved 2026-03-14)*
+
+## Phase 2 — Dual LoRA Implementation
+
+- [x] **2.2** `hunyuanOCR/dual_lora.py` — `DualLoraLinear` + `apply_dual_lora` + 4 unit tests *(approved 2026-03-14)*
+- [x] **2.3** Target layer decision — `notes/target_layers.md` *(LLM-only: 18.48M/1.86%; LLM+ViT: 35.87M/3.60%; approved 2026-03-15)*
+- [x] **2.4** `hunyuanOCR/finetune_duallora.py` — Based on `finetune_lora.py`; separate LR schedulers for magnitude/direction; replay buffer mixing *(approved 2026-03-15)*
+- [x] **2.5** Hyperparameter sweep — rank ∈ {8,16,32}, LR ratio ∈ {0.1,1.0,10.0} — `hunyuanOCR/sweep.py` *(approved 2026-03-15)*
+
+---
+
 # Plan — FinDocOCR Paper
 
 ## Phase 1: Research
@@ -17,16 +46,118 @@
 - [x] **[APPROVED]** Section 2 — Related Work (`draft/sec2_related_work.md`) *(1,467 words; 5 subsections; DocBank + DocLayNet added to bib; 24 total entries; approved 2026-03-11 18:40)*
 - [x] **[APPROVED]** Section 3 — Dataset (`draft/sec3_dataset.md`) *(7,917 bytes; SynFinTabs dual-use clarified; ~Tokens column added; approved 2026-03-11 19:02)*
 - [x] **[APPROVED]** Section 4 — Method (`draft/sec4_method.md`) *(9,125 bytes; rank bound corrected to r₁·r₂; initialization sourced from Xu et al. §3.3 quote; dual_lora_notes.md updated; approved 2026-03-11 19:22)*
-- [ ] **[PENDING]** Section 5 — Experiments (`draft/sec5_experiments.md`) — results TBD; skeleton + placeholders
-- [ ] **[PENDING]** Section 1 — Introduction + Abstract (`draft/sec1_intro.md`) — write last
+- [x] **[APPROVED]** Section 5 — Experiments (`draft/sec5_experiments.md`) *(skeleton + [TBD] placeholders; char-level F1 metric definition corrected; Overall macro-avg justified; approved 2026-03-14)*
+- [x] **[APPROVED]** Section 1 — Introduction + Abstract (`draft/sec1_intro.md`) *(862 words; 28,011 count note + citation style + §6 ref flagged non-blocking; approved 2026-03-15)*
 
 ## Phase 3: LaTeX Integration
-> BLOCKED until Phase 2 APPROVED
 
-- [ ] **[PENDING]** LaTeX skeleton setup (`paper/main.tex`, `paper/references.bib`)
-- [ ] **[PENDING]** Transfer all sections to LaTeX
-- [ ] **[PENDING]** Generate figures (`scripts/gen_figures.py`)
-- [ ] **[PENDING]** Compile and verify (zero undefined citations, zero overfull hbox > 10pt)
+- [x] **[APPROVED]** LaTeX skeleton setup (`paper/main.tex`, `paper/references.bib`) *(24 bib entries; all section stubs; approved 2026-03-15)*
+- [x] **[APPROVED]** Transfer all sections (§§1–5) to LaTeX *(duplicate eq:duallora label fixed; approved 2026-03-15)*
+- [x] **[APPROVED]** Write §6 Conclusion (~300 words) in LaTeX *(~310 words; all 6 required elements; approved 2026-03-15)*
+- [x] **[APPROVED]** Generate figures (`scripts/gen_figures.py`) *(3 placeholder PDFs; numpy import fix applied; approved 2026-03-15)*
+- [x] **[APPROVED]** Compile and verify (zero undefined citations, zero overfull hbox > 10pt) *(6 compile fixes applied; 0 undefined cites; 0 multiply-defined labels; 0 overfull > 10pt; 11pp 503KB PDF; approved 2026-03-15)*
+
+## Phase 2 (Code) — Evaluation
+
+- [x] **2.6** `hunyuanOCR/eval/run_eval.py` — Load checkpoint, run inference on eval JSONL, compute per-feature metrics via `evaluate_batch`, write JSON results *(approved 2026-03-15)*
+
+---
+
+## Phase 3 (Code) — Experiments
+
+- [x] **3.0** Fix eval pipeline for Mac/MPS: `run_eval.py` normalises `eval_bootstrap.jsonl` schema + injects feature prompts; `finetune_duallora.py` PEP 8 fix *(approved 2026-03-17)*
+- [x] **3.1** Assemble combined training dataset: merge all Phase 1 JSONL sources into `dataset/train/train.jsonl` with unified schema (`image`, `prompt`, `response`, `feature`) *(approved 2026-03-17)*
+- [x] **3.2** Baseline eval: run vanilla HunyuanOCR (no fine-tuning) on `dataset/eval/eval_bootstrap.jsonl`; save results to `results/baseline.json` *(approved 2026-03-18 — TEDS 0.669, Strike/Color/Underline all 0.0 as expected)*
+- [x] **3.3** Standard LoRA training: run `finetune_lora.py` on `dataset/train_small` (2k samples, stratified); epoch avg loss 0.516; `lora-output/final/` *(approved 2026-03-18)*
+- [x] **3.4** Standard LoRA eval: TEDS 0.691 (+0.022), Strike 0.0, Underline 0.02, Color 0.02, CER 1.118 (regression expected); `results/lora.json` *(approved 2026-03-18)*
+- [x] **3.5** Dual LoRA training: rank=16, LR ratio=0.1, 1 epoch on train_small; epoch avg loss 0.862 (3.27→0.86); 276 adapters; `duallora-output/final/` *(approved 2026-03-18)*
+- [x] **3.6** Dual LoRA eval: TEDS 0.655 (below baseline 0.669 — 1-epoch regression), CER 0.935; `results/duallora.json` *(approved 2026-03-18)*
+- [x] **3.7** Ablation — LLM+ViT: 330 adapters, loss 0.852, TEDS 0.662 (+0.007 vs LLM-only), CER 0.888; `results/duallora_vit.json` *(approved 2026-03-18)*
+- [x] **3.8** Ablation — no replay: replay dataset had all-empty ground_truth → no gradient signal → 3.5 run is effectively no-replay; `results/duallora_noreplay.json` = same as duallora.json; Limitations note added to paper *(approved 2026-03-18)*
+- [x] **3.9** Populate paper tables: all `\tbd{}` filled except Tan et al. TEDS (external, N/A); paper recompiles 11pp, 0 overfull *(approved 2026-03-18)*
+
+## Phase 5: Paper-Quality Experiments
+> Phase 3 was a 250-step proof-of-concept. Phase 5 is the real experiment targeting ICDAR/DocAI venues.
+> **Current hardware: Mac Mini (48GB unified memory, ≤40GB limit, MPS) + A6000 (Hyperstack, now available 2026-03-22).**
+> Mac Mini config: train_medium (3k samples), **3 epochs**, grad_accum=1 → **9,000 steps/run**, ~75h/run on MPS. Run sequentially — only ONE training process at a time.
+> A6000 config (when available): **5 epochs** → 15,000 steps, ~1.5h/run. Use `--resume_from_checkpoint` to continue Mac Mini runs on A6000.
+> LR: warmup (5% steps) + linear decay, LR=2e-4. Replay buffer for ALL methods.
+> All runs use: `--max_length 2048 --max_pixels 1048576 --gradient_checkpointing --replay_data_dir dataset/replay_proper --replay_every 4`
+> Memory guard: if OOM on MPS, reduce to `--max_pixels 524288`. Never run two training processes simultaneously on Mac Mini.
+> Eval: all experiments evaluated on `dataset/eval/eval_full.jsonl` (1,000 samples, 200/feature) with FIXED color data.
+
+### 5.A — Data & Infrastructure (do first, fast)
+
+- [x] **5.A1** Expand eval set: sample 200/feature from held-out portion of full training data (NOT train_small) → `dataset/eval/eval_full.jsonl` (1,000 samples total, stratified). Update `run_eval.py` to accept `--eval_jsonl` path directly. *(approved 2026-03-18)*
+- [x] **5.A2** Fix replay buffer: build `dataset/replay_proper/train.jsonl` from `fintabnet_train.jsonl` (2,064 labeled HTML samples). Normalise schema: `image=image_path`, `prompt` (table prompt), `response=ground_truth`, `feature=tables`. Script: `dataset/build_replay.py`. *(approved 2026-03-18)*
+- [x] **5.A3** Build `dataset/train_medium/train.jsonl`: 3,000 samples stratified (600/feature) from `dataset/train/train.jsonl`, `random.seed(42)`. Excludes both train_small and eval_full images (0 leakage verified). Script: `dataset/build_medium.py`. *(approved 2026-03-18)*
+- [x] **5.A4** Add `finetune_dora.py`: copy of `finetune_lora.py` but using PEFT `DoraConfig` instead of `LoraConfig` (r=16, lora_alpha=32, same target modules). DoRA is the 2024 SotA LoRA variant — needed as a strong baseline. *(approved 2026-03-18)*
+
+### 5.X — Color Bug Fix (BLOCKS all 5.B/5.C/5.D re-runs on A6000)
+> All existing color-feature training and eval data used font color instead of background/highlight color.
+> Fix must be approved before any A6000 experiment starts.
+
+- [x] **5.X1** Color bug fix — 3 code files *(approved 2026-03-19)*:
+  - `dataset/synthetic_generator.py` — `render_colored()`: black text on colored background rectangle; GT: `<span style="background-color:NAME;">text</span>`
+  - `hunyuanOCR/eval/metrics.py:39` — regex: `color\s*:` → `background-color\s*:`
+  - `hunyuanOCR/eval/run_eval.py:59` — `_FEATURE_PROMPTS["color"]`: update prompt to `background-color:NAME;`
+- [x] **5.X2** Regenerate color samples *(approved 2026-03-19)*: re-run `synthetic_generator.py` for color feature; replace all color-feature rows in `dataset/train/train.jsonl`, `train_small/train.jsonl`, `train_medium/train.jsonl`, `dataset/eval/eval_bootstrap.jsonl`, `dataset/eval/eval_full.jsonl`. Zero non-color rows may change. Verify counts match originals.
+
+### 5.Y — Training Improvements (do before A6000 re-runs)
+> MPS results showed CER regression (0.758) and near-zero feature metrics despite converged loss.
+> Root cause: no general OCR data in LoRA/DoRA training → catastrophic forgetting of base HunyuanOCR capabilities.
+
+- [x] **5.Y1** Add replay buffer support to `finetune_lora.py` and `finetune_dora.py`: accept `--replay_data_dir` + `--replay_every N` (same interface as `finetune_duallora.py`). *(approved 2026-03-19)*
+- [x] **5.Y2** Update LR schedule: add `--warmup_ratio 0.05` + linear decay (replace CosineAnnealing) across all three training scripts. Module-level `_lr_warmup_decay` + `functools.partial`. `finetune_duallora.py` uses `warmup_steps_lr` to avoid shadowing adapter warmup. *(approved 2026-03-19)*
+- [x] **5.Y3** Add `finetune_loraplus.py`: LoRA+ dual-LR optimizer (A-group base LR, B-group `lr * 16.0`); `_build_loraplus_optimizer` module-level; BibTeX `hayou2024loraplus` added. *(approved 2026-03-19)*
+
+### 5.Z — Training Script Consistency Fixes (BLOCKS 5.B A6000 runs)
+> Audit found inconsistencies between training scripts that must be fixed before A6000 experiments.
+
+- [x] **5.Z1** `finetune_duallora.py`: add `--gradient_checkpointing` arg *(approved 2026-03-20)*
+- [x] **5.Z2** `finetune_duallora.py`: add `--resume_from_checkpoint` support *(approved 2026-03-20)*
+- [x] **5.Z3** `finetune_duallora.py`: change `--replay_every` default from 8 → 4 *(approved 2026-03-20)*
+- [x] **5.Z4** `finetune_duallora.py`: fix epoch loss averaging *(approved 2026-03-20)*
+- [x] **5.Z5** Eval cleanup: teds.py, metrics.py, run_eval.py *(approved 2026-03-20)*
+- [x] **5.Z6** `dual_lora.py:100` — `delta_W.to(x.dtype)` cast: CUDA dtype mismatch fix (adapter params float32, model bfloat16) *(approved 2026-03-22)*
+- [x] **5.Z7** `finetune_duallora.py` — `set_sharing_strategy("file_system")` moved after all imports (was mid-import block) *(approved 2026-03-22)*
+- [x] **5.Z8** All 4 training scripts — epoch avg loss double-division fixed: accumulate `outputs.loss.detach().item()` (raw) before grad_accum division *(approved 2026-03-22)*
+- [x] **5.Z9** `run_eval.py` — `--max_pixels` arg (default 1048576): sets `processor.image_processor.max_pixels` to prevent OOM on large images *(approved 2026-03-22)*
+
+### 5.B — Main Experiments (Mac Mini interim, then A6000 when available)
+> MPS runs (5.B1-mps, 5.B2-mps) used wrong color data + no replay — kept as historical reference only.
+> Mac Mini: run sequentially (one at a time). Priority order: 5.B3 → 5.B1 → 5.B2 → 5.B4.
+> Mac Mini command template: `--epochs 3 --max_length 2048 --max_pixels 1048576 --gradient_checkpointing --replay_data_dir dataset/replay_proper --replay_every 4`
+> A6000 (when available): re-run with `--epochs 5 --resume_from_checkpoint <last_ckpt>` to extend existing checkpoints.
+
+- [x] **5.B1-mps** *(MPS reference, wrong color data, no replay, max_length=1024, 3 epochs — DO NOT USE for paper)*: TEDS 0.6575, Strike F1 0.035, Underline F1 0.040, Color Acc 0.020, CER 0.758 *(approved 2026-03-19)*
+- [x] **5.B2-mps** *(MPS reference, wrong color data, no replay, 3 epochs — DO NOT USE for paper)*: TEDS 0.6717, Strike F1 0.050, Underline F1 0.065, Color Acc 0.000, CER 0.800 *(approved 2026-03-21)*
+- [x] **5.B0** Baseline re-eval: vanilla HunyuanOCR on eval_full.jsonl (fixed color data) → TEDS 0.549, Strike 0.000, Underline 0.000, Color Acc 0.000, CER 1.004 *(approved 2026-03-21)*
+- [x] **5.B1** Standard LoRA: TEDS 0.6575, Strike F1 0.035, Underline F1 0.040, Color Acc 0.020, CER 0.758; `results/lora_v2.json` *(approved 2026-03-22)*
+- [x] **5.B2** DoRA (5-epoch A6000): TEDS 0.613, Strike F1 0.045, Underline F1 0.065, Color Acc 0.000, CER 0.787; `results/dora_v2_a6k.json` *(approved 2026-03-23)*
+- [x] **5.B3** Dual LoRA 3-epoch MPS run: TEDS 0.6125, Strike 0.000, Underline 0.000, Color Acc 0.000, CER 0.971; `results/duallora_v2.json` *(approved 2026-03-22 — feature metrics 0.0 expected at 3 epochs; A6000 5-epoch run is primary result)*
+- [x] **5.B3-a6k** Dual LoRA 5-epoch A6000 run (resumed from checkpoint-1000): TEDS 0.677, Strike F1 0.005, Underline 0.000, Color Acc 0.000, CER 0.489; `results/duallora_v2_a6k.json` *(approved 2026-03-22 — strong CER improvement; feature markup near-zero but text CER low: strike 0.043, underline 0.055)*
+- [x] **5.B4** LoRA+ (5-epoch A6000): TEDS 0.662, Strike F1 0.035, Underline F1 0.030, Color Acc 0.000, CER 0.756; `results/loraplus_v2.json` *(approved 2026-03-23)*
+
+### 5.C — Ablations (Mac Mini, ~75h each at 1 epoch; run after 5.B4)
+> Moved from A6000 to Mac Mini (2026-03-22) — actual A6000 throughput ~46 steps/min, ablations would cost ~4.3h extra on top of 5.B4; Mac Mini is slower but acceptable.
+> All ablations use the SAME base config as 5.B3 except the ablated variable. This ensures fair comparison.
+
+- [x] **5.C1** Dual LoRA — no replay: TEDS 0.577, CER 0.947, Strike 0.000, Underline 0.000, Color 0.000; `results/duallora_noreplay_v2.json` *(approved 2026-03-23 — all feature metrics 0.000 confirms replay buffer essential for feature learning)*
+- [x] **5.C2** Dual LoRA — LLM+ViT: TEDS 0.588, CER 0.941, Strike 0.000, Underline 0.000, Color 0.000; `results/duallora_vit_v2.json` *(approved 2026-03-23 — all feature metrics 0.000 at 1 epoch; ViT inclusion provides no benefit over LLM-only at this training budget)*
+- [x] **5.C3** Rank sensitivity: r=8 TEDS 0.574 CER 0.936; r=32 TEDS 0.602 CER 0.863, color_boundary_f1 0.02 (first non-zero feature metric at 1 epoch); `results/duallora_r8_v2.json`, `results/duallora_r32_v2.json` *(approved 2026-03-24 — r=32 > r=16 > r=8 on TEDS; higher rank helps text quality)*
+
+### 5.D — Statistical Rigor
+
+- [x] **5.D1** Dual LoRA LLM-only × 3 seeds (seed=42,0,1); TEDS 0.5893 ± 0.0145, CER 0.9098 ± 0.0144; `results/duallora_seed{42,0,1}_v2.json` *(approved 2026-03-25)*
+
+### 5.E — Paper Update
+
+- [ ] **5.E1** Update `paper/main.tex` with all Phase 5 results: expand Tab. 1 to include DoRA row; update ablation tables; add rank sensitivity figure; recompile → verify 0 overfull, 0 undefined refs *(OUT OF SCOPE for code writer — assigned to paper writer/reviewer separately)*
 
 ## Phase 4: Improvement / Cleanup
 > Added as needed after reviewer feedback
+
+- [x] **4.1** `hunyuanOCR/dual_lora.py:75–80` — Add `device=linear.weight.device` to all four `torch.empty()` calls (A, B, C, D); re-run 4 unit tests *(approved 2026-03-17)*
+- [x] **4.2** `hunyuanOCR/finetune_duallora.py` + `hunyuanOCR/eval/run_eval.py` — `_get_device()` helper (MPS→CUDA→CPU); `torch_dtype=`; `.to(device)` *(approved 2026-03-17)*
+- [x] **4.3** `hunyuanOCR/eval/teds.py:142` — `max(0.0, ...)` clamp applied *(approved 2026-03-17)*

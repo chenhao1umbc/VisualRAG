@@ -299,28 +299,56 @@ def main() -> None:
                         help="Base model path/ID used when checkpoint_dir is a PEFT adapter (default: tencent/HunyuanOCR)")
     parser.add_argument("--eval_jsonl", type=str, default=None,
                         help="Direct path to eval JSONL file (overrides --eval_dir auto-discovery)")
+    parser.add_argument("--partial_file", type=str, default=None,
+                        help="Path to incremental JSONL for crash-resume (appended per sample; resumable on restart)")
+    parser.add_argument("--max_pixels", type=int, default=1048576,
+                        help="Max image pixels fed to the vision encoder (default 1M). Reduce to prevent OOM.")
     args = parser.parse_args()
 
     processor, model = _load_model(args.checkpoint_dir, base_model_path=args.base_model_path)
+    processor.image_processor.max_pixels = args.max_pixels
+    print(f"Image processor max_pixels set to {args.max_pixels} (~{args.max_pixels // 1024} image tokens max)")
     device = _get_device()
     eval_records = _load_eval_records(args.eval_dir, eval_jsonl=args.eval_jsonl)
 
+    # Load partial results if resuming
+    result_records: list[dict] = []
+    skip_count = 0
+    if args.partial_file and os.path.exists(args.partial_file):
+        with open(args.partial_file, encoding="utf-8") as pf:
+            for line in pf:
+                line = line.strip()
+                if line:
+                    result_records.append(json.loads(line))
+        skip_count = len(result_records)
+        print(f"Resuming from partial file: {skip_count} samples already done, skipping.")
+
     # Track per-feature running counts for progress logging
     feature_counts: dict[str, int] = defaultdict(int)
-    result_records: list[dict] = []
+    for rec in result_records:
+        feature_counts[rec["feature"]] += 1
+
+    partial_fh = open(args.partial_file, "a", encoding="utf-8") if args.partial_file else None
 
     print(f"\nRunning inference on {len(eval_records)} samples...")
     for i, sample in enumerate(eval_records):
+        if i < skip_count:
+            continue
+
         prediction = _run_inference_single(
             sample, processor, model, device, args.max_new_tokens
         )
         feature = sample.get("feature", "general")
         feature_counts[feature] += 1
-        result_records.append({
+        rec = {
             "prediction": prediction,
             "ground_truth": sample.get("response", ""),
             "feature": feature,
-        })
+        }
+        result_records.append(rec)
+        if partial_fh is not None:
+            partial_fh.write(json.dumps(rec) + "\n")
+            partial_fh.flush()
 
         if (i + 1) % 100 == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -328,6 +356,9 @@ def main() -> None:
         if (i + 1) % 10 == 0 or (i + 1) == len(eval_records):
             counts_str = "  ".join(f"{f}={n}" for f, n in sorted(feature_counts.items()))
             print(f"  [{i+1}/{len(eval_records)}]  {counts_str}")
+
+    if partial_fh is not None:
+        partial_fh.close()
 
     # Overall metrics
     overall_metrics = evaluate_batch(result_records)

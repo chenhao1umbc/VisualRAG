@@ -50,7 +50,9 @@ def _get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def _make_epoch_indices(dataset_size: int, epoch: int, skip: int = 0, seed: int = 42) -> list[int]:
+def _make_epoch_indices(
+    dataset_size: int, epoch: int, skip: int = 0, seed: int = 42
+) -> list[int]:
     """Return shuffled dataset indices for one epoch, skipping the first `skip` items."""
     g = torch.Generator()
     g.manual_seed(seed + epoch)
@@ -70,8 +72,12 @@ def find_target_modules(model: torch.nn.Module) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="DoRA fine-tune HunyuanOCR")
     parser.add_argument("--model_path", type=str, default="tencent/HunyuanOCR")
-    parser.add_argument("--data_dir", type=str, required=True,
-                        help="Path to dataset dir containing train.jsonl")
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        required=True,
+        help="Path to dataset dir containing train.jsonl",
+    )
     parser.add_argument("--output_dir", type=str, default="./dora-output")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -83,19 +89,42 @@ def main() -> None:
     parser.add_argument("--dora_dropout", type=float, default=0.05)
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--logging_steps", type=int, default=10)
-    parser.add_argument("--gradient_checkpointing", action="store_true",
-                        help="Enable gradient checkpointing to reduce activation memory")
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
-                        help="Path to checkpoint dir to resume from (e.g. dora-output/checkpoint-600)")
-    parser.add_argument("--max_pixels", type=int, default=1048576,
-                        help="Max image pixels for the vision encoder (default 1M = 1024 tokens)")
-    parser.add_argument("--warmup_ratio", type=float, default=0.05,
-                        help="Fraction of total steps used for linear LR warmup (default: 0.05)")
-    parser.add_argument("--replay_data_dir", type=str, default=None,
-                        help="Path to replay dataset dir (train.jsonl + images/). "
-                             "Every --replay_every optimizer steps, one batch is substituted from this set.")
-    parser.add_argument("--replay_every", type=int, default=4,
-                        help="Substitute a replay batch every N optimizer steps (default: 4)")
+    parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing to reduce activation memory",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to checkpoint dir to resume from (e.g. dora-output/checkpoint-600)",
+    )
+    parser.add_argument(
+        "--max_pixels",
+        type=int,
+        default=1048576,
+        help="Max image pixels for the vision encoder (default 1M = 1024 tokens)",
+    )
+    parser.add_argument(
+        "--warmup_ratio",
+        type=float,
+        default=0.05,
+        help="Fraction of total steps used for linear LR warmup (default: 0.05)",
+    )
+    parser.add_argument(
+        "--replay_data_dir",
+        type=str,
+        default=None,
+        help="Path to replay dataset dir (train.jsonl + images/). "
+        "Every --replay_every optimizer steps, one batch is substituted from this set.",
+    )
+    parser.add_argument(
+        "--replay_every",
+        type=int,
+        default=4,
+        help="Substitute a replay batch every N optimizer steps (default: 4)",
+    )
     args = parser.parse_args()
 
     device = _get_device()
@@ -104,7 +133,9 @@ def main() -> None:
     print("Loading processor...")
     processor = AutoProcessor.from_pretrained(args.model_path, use_fast=False)
     processor.image_processor.max_pixels = args.max_pixels
-    print(f"Image processor max_pixels set to {args.max_pixels} (~{args.max_pixels // 1024} image tokens max)")
+    print(
+        f"Image processor max_pixels set to {args.max_pixels} (~{args.max_pixels // 1024} image tokens max)"
+    )
 
     print("Loading model...")
     model = HunYuanVLForConditionalGeneration.from_pretrained(
@@ -119,10 +150,14 @@ def main() -> None:
 
     resume_step = 0
     if args.resume_from_checkpoint:
-        model = PeftModel.from_pretrained(model, args.resume_from_checkpoint, is_trainable=True)
+        model = PeftModel.from_pretrained(
+            model, args.resume_from_checkpoint, is_trainable=True
+        )
         ckpt_name = os.path.basename(args.resume_from_checkpoint.rstrip("/"))
         resume_step = int(ckpt_name.split("-")[-1])
-        print(f"Resuming from checkpoint: {args.resume_from_checkpoint} (step {resume_step})")
+        print(
+            f"Resuming from checkpoint: {args.resume_from_checkpoint} (step {resume_step})"
+        )
     else:
         target_modules = find_target_modules(model)
         dora_config = LoraConfig(
@@ -147,7 +182,9 @@ def main() -> None:
     replay_iter = None
     if args.replay_data_dir is not None:
         print(f"Loading replay dataset from {args.replay_data_dir}...")
-        replay_dataset = OCRDataset(args.replay_data_dir, processor, max_length=args.max_length)
+        replay_dataset = OCRDataset(
+            args.replay_data_dir, processor, max_length=args.max_length
+        )
         replay_loader = DataLoader(
             replay_dataset,
             batch_size=args.batch_size,
@@ -156,9 +193,13 @@ def main() -> None:
             num_workers=0,
         )
         replay_iter = itertools.cycle(replay_loader)
-        print(f"Replay buffer: {len(replay_dataset)} samples, injecting every {args.replay_every} optimizer steps")
+        print(
+            f"Replay buffer: {len(replay_dataset)} samples, injecting every {args.replay_every} optimizer steps"
+        )
 
-    steps_per_epoch = len(dataset) // (args.batch_size * args.gradient_accumulation_steps)
+    steps_per_epoch = len(dataset) // (
+        args.batch_size * args.gradient_accumulation_steps
+    )
     total_steps = steps_per_epoch * args.epochs
     start_epoch = resume_step // steps_per_epoch
     skip_in_epoch = resume_step % steps_per_epoch
@@ -170,7 +211,10 @@ def main() -> None:
     )
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, functools.partial(_lr_warmup_decay, warmup_steps=warmup_steps, total_steps=total_steps)
+        optimizer,
+        functools.partial(
+            _lr_warmup_decay, warmup_steps=warmup_steps, total_steps=total_steps
+        ),
     )
 
     for _ in range(resume_step):
@@ -194,7 +238,11 @@ def main() -> None:
         epoch_accum_steps = 0
 
         for step, batch in enumerate(dataloader):
-            if replay_iter is not None and global_step > 0 and global_step % args.replay_every == 0:
+            if (
+                replay_iter is not None
+                and global_step > 0
+                and global_step % args.replay_every == 0
+            ):
                 batch = next(replay_iter)
 
             batch = {
@@ -205,7 +253,7 @@ def main() -> None:
             outputs = model(**batch)
             loss = outputs.loss / args.gradient_accumulation_steps
             loss.backward()
-            epoch_loss += loss.item()
+            epoch_loss += outputs.loss.detach().item()
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -216,21 +264,23 @@ def main() -> None:
                 epoch_accum_steps += 1
 
                 if global_step % args.logging_steps == 0:
-                    avg_loss = epoch_loss / (step + 1) * args.gradient_accumulation_steps
+                    avg_loss = epoch_loss / (step + 1)
                     lr = scheduler.get_last_lr()[0]
                     print(
-                        f"Epoch {epoch+1}/{args.epochs} | "
+                        f"Epoch {epoch + 1}/{args.epochs} | "
                         f"Step {global_step}/{total_steps} | "
                         f"Loss: {avg_loss:.4f} | LR: {lr:.2e}"
                     )
 
                 if global_step % args.save_steps == 0:
-                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                    save_path = os.path.join(
+                        args.output_dir, f"checkpoint-{global_step}"
+                    )
                     model.save_pretrained(save_path)
                     print(f"Saved checkpoint to {save_path}")
 
         avg = epoch_loss / max(epoch_accum_steps * args.gradient_accumulation_steps, 1)
-        print(f"Epoch {epoch+1} finished. Avg loss: {avg:.4f}")
+        print(f"Epoch {epoch + 1} finished. Avg loss: {avg:.4f}")
 
     final_path = os.path.join(args.output_dir, "final")
     model.save_pretrained(final_path)

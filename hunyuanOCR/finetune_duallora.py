@@ -29,14 +29,18 @@ import argparse
 import functools
 import itertools
 import os
+import random
 
 import torch
+import torch.multiprocessing
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
 
 from hunyuanOCR.dataset import OCRDataset, collate_fn
 from hunyuanOCR.dual_lora import DualLoraLinear, apply_dual_lora
+
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def _lr_warmup_decay(current_step: int, warmup_steps: int, total_steps: int) -> float:
@@ -85,7 +89,9 @@ def _collect_dual_lora_modules(model: nn.Module) -> list[DualLoraLinear]:
     return [m for _, m in model.named_modules() if isinstance(m, DualLoraLinear)]
 
 
-def _set_warmup_scale(model: nn.Module, step: int, warmup_steps: int, final_scales: dict[int, float]) -> None:
+def _set_warmup_scale(
+    model: nn.Module, step: int, warmup_steps: int, final_scales: dict[int, float]
+) -> None:
     """Linearly scale DualLoraLinear.scale from 0 → final over warmup_steps."""
     if warmup_steps <= 0:
         return
@@ -94,7 +100,9 @@ def _set_warmup_scale(model: nn.Module, step: int, warmup_steps: int, final_scal
         mod.scale = final_scales[mod_id] * factor
 
 
-def _build_optimizer(model: nn.Module, lr_magnitude: float, lr_direction: float, weight_decay: float) -> torch.optim.AdamW:
+def _build_optimizer(
+    model: nn.Module, lr_magnitude: float, lr_direction: float, weight_decay: float
+) -> torch.optim.AdamW:
     """Build AdamW with separate param groups for magnitude (A,B) and direction (C,D)."""
     magnitude_params: list[nn.Parameter] = []
     direction_params: list[nn.Parameter] = []
@@ -148,48 +156,111 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Dual LoRA fine-tune HunyuanOCR")
     # Inherited from finetune_lora.py
     parser.add_argument("--model_path", type=str, default="tencent/HunyuanOCR")
-    parser.add_argument("--data_dir", type=str, required=True,
-                        help="Path to main FinDocOCR dataset dir (train.jsonl + images/)")
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        required=True,
+        help="Path to main FinDocOCR dataset dir (train.jsonl + images/)",
+    )
     parser.add_argument("--output_dir", type=str, default="./duallora-output")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--max_length", type=int, default=2048)
-    parser.add_argument("--max_pixels", type=int, default=1048576,
-                        help="Max image pixels fed to the vision encoder (default 1M = 1024 image tokens). "
-                             "Reduce to prevent sequence-length OOM on MPS.")
+    parser.add_argument(
+        "--max_pixels",
+        type=int,
+        default=1048576,
+        help="Max image pixels fed to the vision encoder (default 1M = 1024 image tokens). "
+        "Reduce to prevent sequence-length OOM on MPS.",
+    )
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--logging_steps", type=int, default=10)
-    parser.add_argument("--gradient_checkpointing", action="store_true",
-                        help="Enable gradient checkpointing to reduce activation memory")
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
-                        help="Path to checkpoint dir to resume from (e.g. duallora-output/checkpoint-600)")
+    parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing to reduce activation memory",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to checkpoint dir to resume from (e.g. duallora-output/checkpoint-600)",
+    )
     # Dual LoRA specific
-    parser.add_argument("--dual_lora_rank", type=int, default=16,
-                        help="Rank r for both magnitude and direction groups (r1=r2=r)")
-    parser.add_argument("--dual_lora_alpha", type=float, default=16.0,
-                        help="Scaling factor alpha for Dual LoRA")
-    parser.add_argument("--lr_magnitude", type=float, default=2e-4,
-                        help="Learning rate for magnitude group (A, B matrices)")
-    parser.add_argument("--lr_direction", type=float, default=2e-5,
-                        help="Learning rate for direction group (C, D matrices)")
-    parser.add_argument("--warmup_steps", type=int, default=50,
-                        help="Linear warm-up steps scaling adapter contribution 0→1")
-    parser.add_argument("--include_vit", action="store_true",
-                        help="Also apply Dual LoRA to ViT encoder layers (LLM+ViT ablation, ~3.60%% params at r=16)")
+    parser.add_argument(
+        "--dual_lora_rank",
+        type=int,
+        default=16,
+        help="Rank r for both magnitude and direction groups (r1=r2=r)",
+    )
+    parser.add_argument(
+        "--dual_lora_alpha",
+        type=float,
+        default=16.0,
+        help="Scaling factor alpha for Dual LoRA",
+    )
+    parser.add_argument(
+        "--lr_magnitude",
+        type=float,
+        default=2e-4,
+        help="Learning rate for magnitude group (A, B matrices)",
+    )
+    parser.add_argument(
+        "--lr_direction",
+        type=float,
+        default=2e-5,
+        help="Learning rate for direction group (C, D matrices)",
+    )
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=50,
+        help="Linear warm-up steps scaling adapter contribution 0→1",
+    )
+    parser.add_argument(
+        "--include_vit",
+        action="store_true",
+        help="Also apply Dual LoRA to ViT encoder layers (LLM+ViT ablation, ~3.60%% params at r=16)",
+    )
     # Replay buffer
-    parser.add_argument("--warmup_ratio", type=float, default=0.05,
-                        help="Fraction of total steps used for linear LR warmup (default: 0.05)")
-    parser.add_argument("--replay_data_dir", type=str, default=None,
-                        help="Path to SynFinTabs replay dataset dir (optional)")
-    parser.add_argument("--replay_every", type=int, default=4,
-                        help="Substitute a replay batch every N optimizer steps (default: 4)")
+    parser.add_argument(
+        "--warmup_ratio",
+        type=float,
+        default=0.05,
+        help="Fraction of total steps used for linear LR warmup (default: 0.05)",
+    )
+    parser.add_argument(
+        "--replay_data_dir",
+        type=str,
+        default=None,
+        help="Path to SynFinTabs replay dataset dir (optional)",
+    )
+    parser.add_argument(
+        "--replay_every",
+        type=int,
+        default=4,
+        help="Substitute a replay batch every N optimizer steps (default: 4)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (sets random, torch, and torch.cuda seeds)",
+    )
     args = parser.parse_args()
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     print("Loading processor...")
     processor = AutoProcessor.from_pretrained(args.model_path, use_fast=False)
     processor.image_processor.max_pixels = args.max_pixels
-    print(f"Image processor max_pixels set to {args.max_pixels} (~{args.max_pixels // 1024} image tokens max)")
+    print(
+        f"Image processor max_pixels set to {args.max_pixels} (~{args.max_pixels // 1024} image tokens max)"
+    )
 
     device = _get_device()
     print(f"Device: {device}")
@@ -205,7 +276,9 @@ def main() -> None:
         param.requires_grad = False
 
     target_modules = TARGET_MODULES_LLM_VIT if args.include_vit else TARGET_MODULES_LLM
-    print(f"Applying Dual LoRA (rank={args.dual_lora_rank}, alpha={args.dual_lora_alpha}, targets={'LLM+ViT' if args.include_vit else 'LLM-only'})...")
+    print(
+        f"Applying Dual LoRA (rank={args.dual_lora_rank}, alpha={args.dual_lora_alpha}, targets={'LLM+ViT' if args.include_vit else 'LLM-only'})..."
+    )
     apply_dual_lora(
         model,
         target_modules=target_modules,
@@ -216,17 +289,25 @@ def main() -> None:
     # Count trainable params
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
-    print(f"Trainable parameters: {trainable:,} / {total:,} ({trainable/total*100:.2f}%)")
+    print(
+        f"Trainable parameters: {trainable:,} / {total:,} ({trainable / total * 100:.2f}%)"
+    )
 
     resume_step = 0
     if args.resume_from_checkpoint:
-        adapters_path = os.path.join(args.resume_from_checkpoint, "dual_lora_adapters_only.pt")
+        adapters_path = os.path.join(
+            args.resume_from_checkpoint, "dual_lora_adapters_only.pt"
+        )
         if not os.path.exists(adapters_path):
-            raise FileNotFoundError(f"No dual_lora_adapters_only.pt in {args.resume_from_checkpoint}")
+            raise FileNotFoundError(
+                f"No dual_lora_adapters_only.pt in {args.resume_from_checkpoint}"
+            )
         _load_dual_lora_adapters(model, adapters_path, device)
         ckpt_name = os.path.basename(args.resume_from_checkpoint.rstrip("/"))
         resume_step = int(ckpt_name.split("-")[-1])
-        print(f"Resuming from checkpoint: {args.resume_from_checkpoint} (step {resume_step})")
+        print(
+            f"Resuming from checkpoint: {args.resume_from_checkpoint} (step {resume_step})"
+        )
 
     if args.gradient_checkpointing:
         model.enable_input_require_grads()
@@ -261,7 +342,9 @@ def main() -> None:
     replay_iter = None
     if args.replay_data_dir is not None:
         print(f"Loading replay dataset from {args.replay_data_dir}...")
-        replay_dataset = OCRDataset(args.replay_data_dir, processor, max_length=args.max_length)
+        replay_dataset = OCRDataset(
+            args.replay_data_dir, processor, max_length=args.max_length
+        )
         replay_loader = DataLoader(
             replay_dataset,
             batch_size=args.batch_size,
@@ -270,14 +353,19 @@ def main() -> None:
             num_workers=2,
         )
         replay_iter = itertools.cycle(replay_loader)
-        print(f"Replay buffer: {len(replay_dataset)} samples, injecting every {args.replay_every} optimizer steps")
+        print(
+            f"Replay buffer: {len(replay_dataset)} samples, injecting every {args.replay_every} optimizer steps"
+        )
 
     steps_per_epoch = len(main_loader) // args.gradient_accumulation_steps
     total_steps = steps_per_epoch * args.epochs
     start_epoch = resume_step // max(steps_per_epoch, 1)
     warmup_steps_lr = int(total_steps * args.warmup_ratio)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, functools.partial(_lr_warmup_decay, warmup_steps=warmup_steps_lr, total_steps=total_steps)
+        optimizer,
+        functools.partial(
+            _lr_warmup_decay, warmup_steps=warmup_steps_lr, total_steps=total_steps
+        ),
     )
 
     for _ in range(resume_step):
@@ -292,7 +380,11 @@ def main() -> None:
         epoch_accum_steps = 0
         for step, batch in enumerate(main_loader):
             # Inject replay batch instead of main batch every replay_every optimizer steps
-            if replay_iter is not None and global_step > 0 and global_step % args.replay_every == 0:
+            if (
+                replay_iter is not None
+                and global_step > 0
+                and global_step % args.replay_every == 0
+            ):
                 batch = next(replay_iter)
 
             batch = {
@@ -303,7 +395,7 @@ def main() -> None:
             outputs = model(**batch)
             loss = outputs.loss / args.gradient_accumulation_steps
             loss.backward()
-            epoch_loss += loss.item()
+            epoch_loss += outputs.loss.detach().item()
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -317,18 +409,20 @@ def main() -> None:
                 _set_warmup_scale(model, global_step, args.warmup_steps, final_scales)
 
                 if global_step % args.logging_steps == 0:
-                    avg_loss = epoch_loss / (step + 1) * args.gradient_accumulation_steps
+                    avg_loss = epoch_loss / (step + 1)
                     lr_mag = optimizer.param_groups[0]["lr"]
                     lr_dir = optimizer.param_groups[1]["lr"]
                     print(
-                        f"Epoch {epoch+1}/{args.epochs} | "
+                        f"Epoch {epoch + 1}/{args.epochs} | "
                         f"Step {global_step}/{total_steps} | "
                         f"Loss: {avg_loss:.4f} | "
                         f"LR mag: {lr_mag:.2e} | LR dir: {lr_dir:.2e}"
                     )
 
                 if global_step % args.save_steps == 0:
-                    ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                    ckpt_dir = os.path.join(
+                        args.output_dir, f"checkpoint-{global_step}"
+                    )
                     os.makedirs(ckpt_dir, exist_ok=True)
                     model.save_pretrained(ckpt_dir)
                     _save_dual_lora_adapters(
@@ -337,13 +431,15 @@ def main() -> None:
                     print(f"Saved checkpoint to {ckpt_dir}")
 
         avg = epoch_loss / max(epoch_accum_steps * args.gradient_accumulation_steps, 1)
-        print(f"Epoch {epoch+1} finished. Avg loss: {avg:.4f}")
+        print(f"Epoch {epoch + 1} finished. Avg loss: {avg:.4f}")
 
     final_dir = os.path.join(args.output_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
     model.save_pretrained(final_dir)
     processor.save_pretrained(final_dir)
-    _save_dual_lora_adapters(model, os.path.join(final_dir, "dual_lora_adapters_only.pt"))
+    _save_dual_lora_adapters(
+        model, os.path.join(final_dir, "dual_lora_adapters_only.pt")
+    )
     print(f"Training complete. Final model saved to {final_dir}")
 
 

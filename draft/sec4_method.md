@@ -34,7 +34,7 @@ In our primary configuration, we set $r_1 = r_2 = r$ to match the trainable para
 
 ## 4.3 Multi-Feature Training Objective
 
-A single Dual LoRA-augmented HunyuanOCR model is trained jointly on all four formatting features—strikethrough, underline, colored text, and complex financial tables—rather than training four separate specialized models. Joint training is motivated by the observation that financial documents routinely contain multiple formatting features on the same page, and a deployed system must handle arbitrary combinations at inference time without feature-detection pre-processing.
+A single Dual LoRA-augmented HunyuanOCR model is trained jointly on all four formatting features—strikethrough, underline, highlighted text, and complex financial tables—rather than training four separate specialized models. Joint training is motivated by the observation that financial documents routinely contain multiple formatting features on the same page, and a deployed system must handle arbitrary combinations at inference time without feature-detection pre-processing.
 
 **Loss function.** Training uses standard autoregressive cross-entropy loss over ground truth output tokens with teacher forcing. No task-specific heads or auxiliary losses are added; the model learns to produce the correct output format string (`~~text~~`, `<u>text</u>`, color spans, or structural HTML) as part of the natural language generation objective. The output format is determined entirely by the input image, with no explicit feature-selector prompt.
 
@@ -48,7 +48,7 @@ The model is trained to produce a unified output representation that extends sta
 
 - **Strikethrough**: `~~deleted text~~` — two tilde characters on each side, consistent with CommonMark Markdown extension syntax
 - **Underline**: `<u>underlined text</u>` — standard HTML inline element
-- **Colored text**: `<span style="color:NAME;">colored text</span>` — HTML inline element with a named color from the closed vocabulary {`red`, `blue`, `green`, `orange`, `purple`, `yellow`, `gray`}
+- **Highlighted text**: `<span style="background-color:NAME;">text</span>` — HTML inline element with a named color from the closed vocabulary {`red`, `blue`, `green`, `orange`, `purple`, `yellow`, `gray`}
 - **Complex tables**: Full structural `<table>` HTML with `colspan` and `rowspan` attributes preserved; all presentational attributes stripped
 - **Plain text and formulas**: Standard Markdown and `$$...$$` LaTeX, unchanged from vanilla HunyuanOCR output
 
